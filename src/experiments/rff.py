@@ -3,11 +3,8 @@ Implementation of Random Fourier Features (RFF) for transforming data into a hig
 feature space.
 """
 
-from socket import MSG_EOF
 import sys
 from pathlib import Path
-
-from pandas.core.groupby import base
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -64,8 +61,8 @@ def get_rff_features_sklearn(X, output_dim=1000, gamma=0.5, seed=123):
 
 def main():
 
-    X_train, y_train, beta_true = generate_data()
-    X_test, y_test, _ = generate_data(beta=beta_true)
+    X_train, y_train, beta_true = generate_data(complexity_mode=True)
+    X_test, y_test, _ = generate_data(beta=beta_true, complexity_mode=True)
 
 
     # We use the Ridgeless Linear Regression as the bar to beat

@@ -2,7 +2,7 @@ import numpy as np
 
 
 def generate_data(
-    t=50, p=200, signal_dims=10, noise_std=0.1, seed=123, beta=None
+    t=50, p=200, signal_dims=10, noise_std=0.1, seed=123, beta=None, complexity_mode=False
 ):
     """
     Generate synthetic data for benign overfitting experiments.
@@ -30,6 +30,14 @@ def generate_data(
         beta[:signal_dims] = generator.normal(0, 1, signal_dims)
 
     X = generator.normal(0, 1, size=(t, p))
-    y = X @ beta + generator.normal(0, noise_std, t)
+    linear_signal = X @ beta
+
+    if complexity_mode:
+        # The relationship is now a Parabola, not a Line.
+        signal = (linear_signal / np.sqrt(signal_dims)) ** 2
+        y = signal + generator.normal(0, noise_std, t)
+    else:
+        # Old Linear Mode
+        y = linear_signal + generator.normal(0, noise_std, t)
 
     return X, y, beta
