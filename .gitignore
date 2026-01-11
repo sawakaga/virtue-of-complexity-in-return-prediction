@@ -47,7 +47,6 @@ dmypy.json
 *.ipynb
 
 # Data files
-data/
 *.csv
 *.h5
 *.hdf5
