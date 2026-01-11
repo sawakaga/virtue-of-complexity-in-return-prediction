@@ -3,8 +3,11 @@ Implementation of Random Fourier Features (RFF) for transforming data into a hig
 feature space.
 """
 
+from socket import MSG_EOF
 import sys
 from pathlib import Path
+
+from pandas.core.groupby import base
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -60,44 +63,44 @@ def get_rff_features_sklearn(X, output_dim=1000, gamma=0.5, seed=123):
 
 
 def main():
-    # First run the benign overfitting experiment
-    benign_overfitting.main()
 
-    print("\n" + "=" * 60)
-    print("RFF EXPERIMENTS")
-    print("=" * 60 + "\n")
-
-    # Generate data
     X_train, y_train, beta_true = generate_data()
     X_test, y_test, _ = generate_data(beta=beta_true)
 
-    # Get RFF features using sklearn's implementation
-    Z_train_sklearn = get_rff_features_sklearn(X_train)
-    Z_test_sklearn = get_rff_features_sklearn(X_test)
 
-    print("=" * 60)
-    print("Linear Regression (OLS) with RFF")
-    print("=" * 60)
-    beta_hat_linear = regression.linear_regression_sklearn(Z_train_sklearn, y_train)
-    prediction_linear = Z_test_sklearn @ beta_hat_linear
-    linear_mse = calculate_mse(y_test, prediction_linear)
-    linear_r2 = calculate_r2(y_test, prediction_linear)
+    # We use the Ridgeless Linear Regression as the bar to beat
+    beta_ridgeless = regression.ridgeless_regression_sklearn(X_train, y_train)
+    pred_base = X_test @ beta_ridgeless
+    base_r2 = calculate_r2(y_test, pred_base)
+    base_mse = calculate_mse(y_test, pred_base)
 
-    print(f"Test MSE: {linear_mse:.4f}")
-    print(f"Test R²:  {linear_r2:.4f}")
-    print()
+    print(f"BASELINE (Linear Ridgeless) R2: {base_r2:.4f}")
+    print(f"BASELINE (Linear Ridgeless) MSE: {base_mse:.4f}")
+    print("-" * 50)
+    print(f"{'Gamma':<10} | {'Test R2':<10} | {'Status R2':<10} | {'Test MSE':<10} | {'Status MSE':<10}")
+    print("-" * 50)
 
-    print("=" * 60)
-    print("Ridgeless Regression with RFF")
-    print("=" * 60)
-    beta_hat_ridgeless = regression.ridgeless_regression_sklearn(Z_train_sklearn, y_train)
-    prediction_ridgeless = Z_test_sklearn @ beta_hat_ridgeless
-    ridgeless_mse = calculate_mse(y_test, prediction_ridgeless)
-    ridgeless_r2 = calculate_r2(y_test, prediction_ridgeless)
 
-    print(f"Test MSE: {ridgeless_mse:.4f}")
-    print(f"Test R²:  {ridgeless_r2:.4f}")
+    # We try different "zoom levels" - gamma
+    gammas = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
 
+    for g in gammas:
+        Z_train = get_rff_features_sklearn(X_train, output_dim=1000, gamma=g, seed=123)
+        Z_test  = get_rff_features_sklearn(X_test,  output_dim=1000, gamma=g, seed=123)
+
+        # B. Solve (Ridgeless)
+        beta_rff = regression.ridgeless_regression_sklearn(Z_train, y_train)
+
+        # C. Predict
+        pred_rff = Z_test @ beta_rff
+        r2 = calculate_r2(y_test, pred_rff)
+        mse = calculate_mse(y_test, pred_rff)
+
+        # Check if we beat the baseline
+        status_r2 = "WINNER" if r2 > base_r2 else "LOSE"
+        status_mse = "WINNER" if mse < base_mse else "LOSE"
+
+        print(f"{g:<10} | {r2:.4f}     | {status_r2} | {mse:.4f}     | {status_mse}")
 
 if __name__ == "__main__":
     main()
