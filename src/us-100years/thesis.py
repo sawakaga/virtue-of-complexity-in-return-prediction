@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from sklearn.kernel_approximation import RBFSampler
 from sklearn.linear_model import Ridge
 from tqdm import tqdm
@@ -109,7 +112,8 @@ def run_rff_ridge_oos(
     dates = y_aligned.index
 
     results = []
-    rff_cache: dict[tuple[float, int], "np.ndarray"] = {}
+    rff_cache: dict[tuple[float, int], np.ndarray] = {}
+    cache_lock = threading.Lock()
 
     config_list = []
     for window in windows:
@@ -119,26 +123,22 @@ def run_rff_ridge_oos(
                 for alpha in alphas:
                     config_list.append((window, gamma, n_features, alpha))
 
-    config_bar = tqdm(config_list, desc="Model configs", unit="config")
-
-    for window, gamma, n_features, alpha in config_bar:
+    def get_rff_features(gamma: float, n_features: int) -> np.ndarray:
         cache_key = (gamma, n_features)
-        if cache_key not in rff_cache:
-            rff = RBFSampler(
-                gamma=gamma, n_components=n_features, random_state=seed
-            )
-            rff_cache[cache_key] = rff.fit_transform(x_lagged.to_numpy())
+        if cache_key in rff_cache:
+            return rff_cache[cache_key]
+        with cache_lock:
+            if cache_key not in rff_cache:
+                rff = RBFSampler(
+                    gamma=gamma, n_components=n_features, random_state=seed
+                )
+                rff_cache[cache_key] = rff.fit_transform(x_lagged.to_numpy())
+        return rff_cache[cache_key]
 
-        z_all = rff_cache[cache_key]
-
-        t_bar = tqdm(
-            range(window, len(y_aligned) - 1),
-            desc=f"T={window} F={n_features} a={alpha}",
-            unit="step",
-            position=1,
-            leave=False,
-        )
-        for t in t_bar:
+    def run_config(window: int, gamma: float, n_features: int, alpha: float) -> list[dict]:
+        z_all = get_rff_features(gamma, n_features)
+        local_results = []
+        for t in range(window, len(y_aligned) - 1):
             x_train = z_all[t - window : t]
             y_train = y_aligned.iloc[t - window + 1 : t + 1].to_numpy()
 
@@ -149,7 +149,7 @@ def run_rff_ridge_oos(
             y_pred = float(model.predict(x_forecast)[0])
             y_true = float(y_aligned.iloc[t + 1])
 
-            results.append(
+            local_results.append(
                 {
                     "date": int(dates[t + 1]),
                     "window": window,
@@ -161,6 +161,16 @@ def run_rff_ridge_oos(
                     "strategy_return": y_pred * y_true,
                 }
             )
+        return local_results
+
+    config_bar = tqdm(config_list, desc="Model configs", unit="config")
+    parallel_results = Parallel(n_jobs=-1, prefer="threads")(
+        delayed(run_config)(window, gamma, n_features, alpha)
+        for window, gamma, n_features, alpha in config_bar
+    )
+
+    for chunk in parallel_results:
+        results.extend(chunk)
 
     return pd.DataFrame(results)
 
