@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import threading
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +21,7 @@ START_DATE = 193001
 MAX_RFF_FEATURES = 12000
 TRAINING_WINDOWS = [12, 60, 120]
 RIDGE_ALPHAS = [10 ** p for p in range(-3, 4)]
-GAMMA_LIST = [2.0]
+GAMMA = 2.0
 RANDOM_SEED = 123
 
 
@@ -104,7 +104,7 @@ def run_rff_ridge_oos(
     *,
     windows: list[int],
     max_features: int,
-    gammas: list[float],
+    gamma: float,
     alphas: list[float],
     seed: int,
 ) -> pd.DataFrame:
@@ -112,61 +112,53 @@ def run_rff_ridge_oos(
     dates = y_aligned.index
 
     results = []
-    rff_cache: dict[tuple[float, int], np.ndarray] = {}
-    cache_lock = threading.Lock()
-
-    config_list = []
+    features_to_windows: dict[int, list[int]] = {}
     for window in windows:
         feature_counts = rff_feature_counts(window, max_features=max_features)
-        for gamma in gammas:
-            for n_features in feature_counts:
-                for alpha in alphas:
-                    config_list.append((window, gamma, n_features, alpha))
+        for n_features in feature_counts:
+            features_to_windows.setdefault(n_features, []).append(window)
 
-    def get_rff_features(gamma: float, n_features: int) -> np.ndarray:
-        cache_key = (gamma, n_features)
-        if cache_key in rff_cache:
-            return rff_cache[cache_key]
-        with cache_lock:
-            if cache_key not in rff_cache:
-                rff = RBFSampler(
-                    gamma=gamma, n_components=n_features, random_state=seed
-                )
-                rff_cache[cache_key] = rff.fit_transform(x_lagged.to_numpy())
-        return rff_cache[cache_key]
-
-    def run_config(window: int, gamma: float, n_features: int, alpha: float) -> list[dict]:
-        z_all = get_rff_features(gamma, n_features)
+    def run_feature_config(n_features: int) -> list[dict]:
+        rff = RBFSampler(
+            gamma=gamma, n_components=n_features, random_state=seed
+        )
+        z_all = rff.fit_transform(x_lagged.to_numpy())
         local_results = []
-        for t in range(window, len(y_aligned) - 1):
-            x_train = z_all[t - window : t]
-            y_train = y_aligned.iloc[t - window + 1 : t + 1].to_numpy()
 
-            model = Ridge(alpha=alpha)
-            model.fit(x_train, y_train)
+        for window in features_to_windows[n_features]:
+            for alpha in alphas:
+                for t in range(window, len(y_aligned) - 1):
+                    x_train = z_all[t - window : t]
+                    y_train = y_aligned.iloc[t - window + 1 : t + 1].to_numpy()
 
-            x_forecast = z_all[t : t + 1]
-            y_pred = float(model.predict(x_forecast)[0])
-            y_true = float(y_aligned.iloc[t + 1])
+                    model = Ridge(alpha=alpha)
+                    model.fit(x_train, y_train)
 
-            local_results.append(
-                {
-                    "date": int(dates[t + 1]),
-                    "window": window,
-                    "gamma": gamma,
-                    "n_features": n_features,
-                    "alpha": alpha,
-                    "y_true": y_true,
-                    "y_pred": y_pred,
-                    "strategy_return": y_pred * y_true,
-                }
-            )
+                    x_forecast = z_all[t : t + 1]
+                    y_pred = float(model.predict(x_forecast)[0])
+                    y_true = float(y_aligned.iloc[t + 1])
+
+                    local_results.append(
+                        {
+                            "date": int(dates[t + 1]),
+                            "window": window,
+                            "gamma": gamma,
+                            "n_features": n_features,
+                            "alpha": alpha,
+                            "y_true": y_true,
+                            "y_pred": y_pred,
+                            "strategy_return": y_pred * y_true,
+                        }
+                    )
+
         return local_results
 
-    config_bar = tqdm(config_list, desc="Model configs", unit="config")
-    parallel_results = Parallel(n_jobs=-1, prefer="threads")(
-        delayed(run_config)(window, gamma, n_features, alpha)
-        for window, gamma, n_features, alpha in config_bar
+    feature_configs = list(features_to_windows.keys())
+    config_bar = tqdm(feature_configs, desc="RFF features", unit="config")
+    n_jobs = max(1, (os.cpu_count() or 2) - 1)
+    parallel_results = Parallel(n_jobs=n_jobs, prefer="processes")(
+        delayed(run_feature_config)(n_features)
+        for n_features in config_bar
     )
 
     for chunk in parallel_results:
@@ -226,7 +218,7 @@ def main() -> None:
         predictor_cols,
         windows=TRAINING_WINDOWS,
         max_features=MAX_RFF_FEATURES,
-        gammas=GAMMA_LIST,
+        gamma=GAMMA,
         alphas=RIDGE_ALPHAS,
         seed=RANDOM_SEED,
     )
