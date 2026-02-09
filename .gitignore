@@ -44,10 +44,8 @@ dmypy.json
 
 # Jupyter
 .ipynb_checkpoints
-*.ipynb
 
 # Data files
-*.csv
 *.h5
 *.hdf5
 *.parquet

@@ -40,16 +40,25 @@ ruff check --fix .     # Auto-fix issues
 ruff format .          # Format code
 ```
 
+## Primary Entry Point
+
+Run the main script from the project root:
+
+```bash
+python src/us-100years/thesis.py
+```
+
 ## Project Structure
 
 ```
 .
-├── src/                    # Main source code
-│   └── __init__.py
-├── tests/                  # Unit tests
-│   └── __init__.py
-├── notebooks/              # Jupyter notebooks (to be created)
-├── data/                   # Data files (gitignored)
+├── data/                   # Data files used by thesis.py
+│   ├── 15-predictors.csv
+│   └── fama-french-return.csv
+├── src/
+│   └── us-100years/
+│       └── thesis.py       # Main script (authoritative entry point)
+├── archive/                # Prior experiments and legacy code
 ├── pyproject.toml          # Project configuration & dependencies
 ├── .pre-commit-config.yaml # Pre-commit hooks
 └── README.md
