@@ -645,22 +645,6 @@ def run_fit_core_gpu(
         show_progress=True,
     )
 
-
-def run_fit_core_cpu_reference(
-    x_lagged: np.ndarray,
-    y_aligned: np.ndarray,
-    config: GPUFitConfig,
-) -> tuple[FitCoreMetrics, list[ConfigOOSMetrics]]:
-    return _run_fit_core_impl(
-        x_lagged,
-        y_aligned,
-        config,
-        run_device=torch.device("cpu"),
-        run_dtype=torch.float32,
-        show_progress=False,
-    )
-
-
 def prediction_subset_gpu(
     x_lagged: np.ndarray,
     y_aligned: np.ndarray,
