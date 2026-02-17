@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import math
+import sys
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -25,8 +27,10 @@ TRAINING_WINDOWS = [12, 60, 120]
 RIDGE_ALPHAS = [10**p for p in range(-3, 4)]
 GAMMA = 2.0
 RANDOM_SEED = 123
+DEFAULT_METRICS_OUTPUT = "artifacts/oos_config_metrics.csv"
 
 SolverPolicy = Literal["auto", "primal", "dual"]
+BenchmarkMode = Literal["campbell_thompson"]
 
 
 @dataclass(slots=True)
@@ -44,6 +48,9 @@ class GPUFitConfig:
     chunk_size_features: int | None = None
     profile: bool = False
     deterministic: bool = False
+    compute_oos_metrics: bool = True
+    metrics_output_path: str | None = None
+    benchmark_mode: BenchmarkMode = "campbell_thompson"
 
 
 @dataclass(slots=True)
@@ -79,9 +86,40 @@ class FitCoreMetrics:
     feature_profiles: list[FeatureProfile]
 
 
+@dataclass(slots=True)
+class ConfigOOSMetrics:
+    window: int
+    n_features: int
+    alpha: float
+    solver_used: str
+    n_oos: int
+    avg_beta_l2: float
+    r2_oos_ct: float
+    timing_mean_monthly: float
+    timing_vol_monthly: float
+    timing_sharpe_monthly: float
+    timing_sharpe_annualized: float
+    timing_mean_annualized: float
+    timing_vol_annualized: float
+
+
+@dataclass(slots=True)
+class _MetricAccumulator:
+    window: int
+    n_features: int
+    alpha: float
+    solver_used: str
+    n_oos: int = 0
+    beta_l2_sum: float = 0.0
+    pred_err2_sum: float = 0.0
+    bench_err2_sum: float = 0.0
+    timing_sum: float = 0.0
+    timing_sum2: float = 0.0
+
+
 def project_root() -> Path:
-    if "google.colab" in str(get_ipython()):
-        return Path(Path.cwd())
+    if "google.colab" in sys.modules:
+        return Path.cwd()
     return Path(__file__).resolve().parents[2]
 
 
@@ -339,23 +377,71 @@ def _solve_dual(
     return betas
 
 
-def run_fit_core_gpu(
+def _finalize_oos_metrics(
+    accumulators: dict[tuple[int, int, float], _MetricAccumulator],
+) -> list[ConfigOOSMetrics]:
+    rows: list[ConfigOOSMetrics] = []
+    for key in sorted(accumulators.keys()):
+        agg = accumulators[key]
+        if agg.n_oos == 0:
+            continue
+
+        avg_beta_l2 = agg.beta_l2_sum / agg.n_oos
+        r2_oos_ct = float("nan")
+        if agg.bench_err2_sum > 0:
+            r2_oos_ct = 1.0 - (agg.pred_err2_sum / agg.bench_err2_sum)
+
+        mean_m = agg.timing_sum / agg.n_oos
+        second_m = agg.timing_sum2 / agg.n_oos
+        var_m = max(second_m - mean_m * mean_m, 0.0)
+        vol_m = math.sqrt(var_m)
+        sharpe_m = mean_m / vol_m if vol_m > 0 else float("nan")
+
+        rows.append(
+            ConfigOOSMetrics(
+                window=agg.window,
+                n_features=agg.n_features,
+                alpha=agg.alpha,
+                solver_used=agg.solver_used,
+                n_oos=agg.n_oos,
+                avg_beta_l2=avg_beta_l2,
+                r2_oos_ct=r2_oos_ct,
+                timing_mean_monthly=mean_m,
+                timing_vol_monthly=vol_m,
+                timing_sharpe_monthly=sharpe_m,
+                timing_sharpe_annualized=(sharpe_m * math.sqrt(12.0))
+                if math.isfinite(sharpe_m)
+                else float("nan"),
+                timing_mean_annualized=mean_m * 12.0,
+                timing_vol_annualized=vol_m * math.sqrt(12.0),
+            )
+        )
+    return rows
+
+
+def _run_fit_core_impl(
     x_lagged: np.ndarray,
     y_aligned: np.ndarray,
     config: GPUFitConfig,
-) -> FitCoreMetrics:
+    *,
+    run_device: torch.device,
+    run_dtype: torch.dtype,
+    show_progress: bool,
+) -> tuple[FitCoreMetrics, list[ConfigOOSMetrics]]:
     if config.chunk_size_windows < 1:
         raise ValueError("chunk_size_windows must be >= 1")
     if config.chunk_size_features is not None and config.chunk_size_features < 1:
         raise ValueError("chunk_size_features must be >= 1 when provided")
+    if config.benchmark_mode != "campbell_thompson":
+        raise ValueError(f"Unsupported benchmark_mode: {config.benchmark_mode}")
 
-    if config.device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device=config.device)
+    if run_device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device=run_device)
 
     deterministic_prev = torch.are_deterministic_algorithms_enabled()
     if config.deterministic:
         torch.use_deterministic_algorithms(True)
-        if config.device.type == "cuda":
+        if run_device.type == "cuda":
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
@@ -363,8 +449,8 @@ def run_fit_core_gpu(
         min(config.windows), max_features=config.max_features
     )
 
-    x_t = torch.tensor(x_lagged, device=config.device, dtype=config.dtype)
-    y_t = torch.tensor(y_aligned, device=config.device, dtype=config.dtype)
+    x_t = torch.tensor(x_lagged, device=run_device, dtype=run_dtype)
+    y_t = torch.tensor(y_aligned, device=run_device, dtype=run_dtype)
 
     feature_profiles: list[FeatureProfile] = []
     checksum = 0.0
@@ -373,11 +459,18 @@ def run_fit_core_gpu(
     total_solve_calls = 0
     total_primal_solve_calls = 0
     total_dual_solve_calls = 0
+    oos_accumulators: dict[tuple[int, int, float], _MetricAccumulator] = {}
 
     run_start = time.perf_counter()
 
     try:
-        for n_features in tqdm(feature_counts, desc="RFF features", unit="config"):
+        iterator = tqdm(
+            feature_counts,
+            desc="RFF features",
+            unit="config",
+            disable=not show_progress,
+        )
+        for n_features in iterator:
             feature_start = time.perf_counter()
 
             rff_start = time.perf_counter()
@@ -386,11 +479,11 @@ def run_fit_core_gpu(
                 x_t.shape[1],
                 gamma=config.gamma,
                 seed=config.seed,
-                device=config.device,
-                dtype=config.dtype,
+                device=run_device,
+                dtype=run_dtype,
             )
             z_all = rff_transform(x_t, w_t, b_t)
-            _synchronize(config.device)
+            _synchronize(run_device)
             rff_time = time.perf_counter() - rff_start
 
             window_build_time = 0.0
@@ -407,12 +500,13 @@ def run_fit_core_gpu(
 
                 build_start = time.perf_counter()
                 z_windows, y_windows = build_window_tensors(z_all, y_t, window)
-                _synchronize(config.device)
+                _synchronize(run_device)
                 window_build_time += time.perf_counter() - build_start
                 windows_processed += 1
 
                 solver = _select_solver(config.solver_policy, n_features, window)
                 total_k = z_windows.shape[0]
+
                 for start in range(0, total_k, config.chunk_size_windows):
                     end = min(start + config.chunk_size_windows, total_k)
                     z_chunk = z_windows[start:end]
@@ -430,16 +524,46 @@ def run_fit_core_gpu(
                             chunk_size_features=config.chunk_size_features,
                         )
                         dual_solve_calls += (end - start) * len(config.alphas)
-                    _synchronize(config.device)
+                    _synchronize(run_device)
                     solve_time += time.perf_counter() - solve_start
 
-                    for beta in betas.values():
+                    if config.compute_oos_metrics:
+                        z_pred = z_all[(window - 1 + start) : (window - 1 + end)]
+                        y_true_oos = y_t[(window + start) : (window + end)]
+                        y_bench_oos = y_chunk.mean(dim=1)
+
+                    for alpha, beta in betas.items():
                         checksum += float(beta.sum().item())
+
+                        if config.compute_oos_metrics:
+                            key = (window, n_features, float(alpha))
+                            acc = oos_accumulators.get(key)
+                            if acc is None:
+                                acc = _MetricAccumulator(
+                                    window=window,
+                                    n_features=n_features,
+                                    alpha=float(alpha),
+                                    solver_used=solver,
+                                )
+                                oos_accumulators[key] = acc
+
+                            y_pred_oos = (beta * z_pred).sum(dim=1)
+                            timing = y_pred_oos * y_true_oos
+                            pred_err = y_true_oos - y_pred_oos
+                            bench_err = y_true_oos - y_bench_oos
+                            beta_l2 = torch.linalg.vector_norm(beta, dim=1)
+
+                            acc.n_oos += int(y_pred_oos.shape[0])
+                            acc.beta_l2_sum += float(beta_l2.sum().item())
+                            acc.pred_err2_sum += float((pred_err * pred_err).sum().item())
+                            acc.bench_err2_sum += float((bench_err * bench_err).sum().item())
+                            acc.timing_sum += float(timing.sum().item())
+                            acc.timing_sum2 += float((timing * timing).sum().item())
 
                     chunks_processed += 1
                     solve_calls += (end - start) * len(config.alphas)
 
-            current_mem, max_mem = _cuda_memory_snapshot(config.device)
+            current_mem, max_mem = _cuda_memory_snapshot(run_device)
             feature_total_time = time.perf_counter() - feature_start
 
             feature_profiles.append(
@@ -486,9 +610,9 @@ def run_fit_core_gpu(
 
     total_time = time.perf_counter() - run_start
 
-    return FitCoreMetrics(
-        device=str(config.device),
-        dtype=str(config.dtype),
+    fit_metrics = FitCoreMetrics(
+        device=str(run_device),
+        dtype=str(run_dtype),
         n_samples=int(x_lagged.shape[0]),
         n_predictors=int(x_lagged.shape[1]),
         total_features=len(feature_counts),
@@ -500,6 +624,40 @@ def run_fit_core_gpu(
         total_time_s=total_time,
         checksum=checksum,
         feature_profiles=feature_profiles,
+    )
+    oos_metrics = (
+        _finalize_oos_metrics(oos_accumulators) if config.compute_oos_metrics else []
+    )
+    return fit_metrics, oos_metrics
+
+
+def run_fit_core_gpu(
+    x_lagged: np.ndarray,
+    y_aligned: np.ndarray,
+    config: GPUFitConfig,
+) -> tuple[FitCoreMetrics, list[ConfigOOSMetrics]]:
+    return _run_fit_core_impl(
+        x_lagged,
+        y_aligned,
+        config,
+        run_device=config.device,
+        run_dtype=config.dtype,
+        show_progress=True,
+    )
+
+
+def run_fit_core_cpu_reference(
+    x_lagged: np.ndarray,
+    y_aligned: np.ndarray,
+    config: GPUFitConfig,
+) -> tuple[FitCoreMetrics, list[ConfigOOSMetrics]]:
+    return _run_fit_core_impl(
+        x_lagged,
+        y_aligned,
+        config,
+        run_device=torch.device("cpu"),
+        run_dtype=torch.float32,
+        show_progress=False,
     )
 
 
@@ -548,6 +706,29 @@ def prediction_subset_gpu(
         y_true[:take].detach().cpu().numpy(),
     )
 
+
+def oos_metrics_to_frame(rows: list[ConfigOOSMetrics]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "window",
+                "n_features",
+                "alpha",
+                "solver_used",
+                "n_oos",
+                "avg_beta_l2",
+                "r2_oos_ct",
+                "timing_mean_monthly",
+                "timing_vol_monthly",
+                "timing_sharpe_monthly",
+                "timing_sharpe_annualized",
+                "timing_mean_annualized",
+                "timing_vol_annualized",
+            ]
+        )
+    return pd.DataFrame([asdict(row) for row in rows])
+
+
 def print_metrics(metrics: FitCoreMetrics, *, profile: bool) -> None:
     print(f"Device: {metrics.device}")
     print(f"DType: {metrics.dtype}")
@@ -582,6 +763,18 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Run fit-core only; prediction row output is disabled in this phase.",
+    )
+    parser.add_argument(
+        "--compute-oos-metrics",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute per-config OOS and timing metrics.",
+    )
+    parser.add_argument(
+        "--metrics-output-path",
+        type=str,
+        default=DEFAULT_METRICS_OUTPUT,
+        help="CSV output path for per-config OOS metrics.",
     )
     parser.add_argument(
         "--profile",
@@ -649,10 +842,23 @@ def main() -> None:
         chunk_size_features=args.chunk_size_features,
         profile=args.profile,
         deterministic=args.deterministic,
+        compute_oos_metrics=args.compute_oos_metrics,
+        metrics_output_path=args.metrics_output_path,
+        benchmark_mode="campbell_thompson",
     )
 
-    metrics = run_fit_core_gpu(x_lagged, y_aligned, config)
-    print_metrics(metrics, profile=args.profile)
+    fit_metrics, oos_metrics = run_fit_core_gpu(x_lagged, y_aligned, config)
+    print_metrics(fit_metrics, profile=args.profile)
+
+    if config.compute_oos_metrics:
+        metrics_path = project_root() / (
+            config.metrics_output_path or DEFAULT_METRICS_OUTPUT
+        )
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        frame = oos_metrics_to_frame(oos_metrics)
+        frame.to_csv(metrics_path, index=False)
+        print(f"OOS metrics rows: {len(frame)}")
+        print(f"OOS metrics CSV: {metrics_path}")
 
 
 if __name__ == "__main__":
