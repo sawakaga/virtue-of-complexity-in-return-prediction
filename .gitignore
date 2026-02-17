@@ -61,6 +61,9 @@ htmlcov/
 coverage.xml
 *.cover
 
+# Generated outputs
+artifacts/
+
 # Environment variables
 .env
 .env.local
