@@ -20,7 +20,7 @@ INDEX_COL = "Index"
 START_DATE = 193001
 MAX_RFF_FEATURES = 12000
 TRAINING_WINDOWS = [12, 60, 120]
-RIDGE_ALPHAS = [10 ** p for p in range(-3, 4)]
+RIDGE_ALPHAS = [10**p for p in range(-3, 4)]
 GAMMA = 2.0
 RANDOM_SEED = 123
 
@@ -65,9 +65,7 @@ def standardize_expanding(
     return standardized
 
 
-def standardize_rolling(
-    df: pd.DataFrame, column: str, *, window: int
-) -> pd.DataFrame:
+def standardize_rolling(df: pd.DataFrame, column: str, *, window: int) -> pd.DataFrame:
     standardized = df.copy()
     rolling_mean = standardized[column].rolling(window=window).mean()
     rolling_std = standardized[column].rolling(window=window).std()
@@ -119,9 +117,7 @@ def run_rff_ridge_oos(
             features_to_windows.setdefault(n_features, []).append(window)
 
     def run_feature_config(n_features: int) -> list[dict]:
-        rff = RBFSampler(
-            gamma=gamma, n_components=n_features, random_state=seed
-        )
+        rff = RBFSampler(gamma=gamma, n_components=n_features, random_state=seed)
         z_all = rff.fit_transform(x_lagged.to_numpy())
         local_results = []
 
@@ -157,8 +153,7 @@ def run_rff_ridge_oos(
     config_bar = tqdm(feature_configs, desc="RFF features", unit="config")
     n_jobs = max(1, (os.cpu_count() or 2) - 1)
     parallel_results = Parallel(n_jobs=n_jobs, prefer="processes")(
-        delayed(run_feature_config)(n_features)
-        for n_features in config_bar
+        delayed(run_feature_config)(n_features) for n_features in config_bar
     )
 
     for chunk in parallel_results:
@@ -180,11 +175,7 @@ def main() -> None:
     data = predictors.merge(target, on=DATE_COL, how="inner")
     data = data.set_index(DATE_COL).sort_index()
 
-    predictor_cols = [
-        col
-        for col in predictors.columns
-        if col not in {DATE_COL, INDEX_COL, "csp"}
-    ]
+    predictor_cols = [col for col in predictors.columns if col not in {DATE_COL, INDEX_COL, "csp"}]
     # Drop csp: it contains many missing values across the sample and
     # truncates the usable window when requiring complete predictor data.
 
