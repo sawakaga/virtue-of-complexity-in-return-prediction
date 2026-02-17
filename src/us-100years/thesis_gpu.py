@@ -80,6 +80,8 @@ class FitCoreMetrics:
 
 
 def project_root() -> Path:
+    if "google.colab" in str(get_ipython()):
+        return Path(Path.cwd())
     return Path(__file__).resolve().parents[2]
 
 
