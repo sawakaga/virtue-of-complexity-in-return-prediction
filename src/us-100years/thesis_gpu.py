@@ -22,7 +22,7 @@ INDEX_COL = "Index"
 START_DATE = 193001
 MAX_RFF_FEATURES = 12000
 TRAINING_WINDOWS = [12, 60, 120]
-RIDGE_ALPHAS = [10 ** p for p in range(-3, 4)]
+RIDGE_ALPHAS = [10**p for p in range(-3, 4)]
 GAMMA = 2.0
 RANDOM_SEED = 123
 
@@ -89,7 +89,9 @@ def resolve_data_dir() -> Path:
         project_root() / "src" / "data",
     ]
     for candidate in candidates:
-        if (candidate / PREDICTORS_FILE).exists() and (candidate / TARGET_FILE).exists():
+        if (candidate / PREDICTORS_FILE).exists() and (
+            candidate / TARGET_FILE
+        ).exists():
             return candidate
     raise FileNotFoundError(
         "Data files not found. Expected both "
@@ -119,9 +121,7 @@ def standardize_expanding(
     return standardized
 
 
-def standardize_rolling(
-    df: pd.DataFrame, column: str, *, window: int
-) -> pd.DataFrame:
+def standardize_rolling(df: pd.DataFrame, column: str, *, window: int) -> pd.DataFrame:
     standardized = df.copy()
     rolling_mean = standardized[column].rolling(window=window).mean()
     rolling_std = standardized[column].rolling(window=window).std()
@@ -165,9 +165,7 @@ def prepare_dataset() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     data = data.set_index(DATE_COL).sort_index()
 
     predictor_cols = [
-        col
-        for col in predictors.columns
-        if col not in {DATE_COL, INDEX_COL, "csp"}
+        col for col in predictors.columns if col not in {DATE_COL, INDEX_COL, "csp"}
     ]
 
     keep_cols = predictor_cols + [TARGET_COL]
@@ -262,7 +260,9 @@ def _cuda_memory_snapshot(device: torch.device) -> tuple[int | None, int | None]
     )
 
 
-def _select_solver(policy: SolverPolicy, n_features: int, window: int) -> Literal["primal", "dual"]:
+def _select_solver(
+    policy: SolverPolicy, n_features: int, window: int
+) -> Literal["primal", "dual"]:
     if policy == "primal":
         return "primal"
     if policy == "dual":
@@ -357,7 +357,9 @@ def run_fit_core_gpu(
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
-    feature_counts = rff_feature_counts(min(config.windows), max_features=config.max_features)
+    feature_counts = rff_feature_counts(
+        min(config.windows), max_features=config.max_features
+    )
 
     x_t = torch.tensor(x_lagged, device=config.device, dtype=config.dtype)
     y_t = torch.tensor(y_aligned, device=config.device, dtype=config.dtype)
@@ -499,133 +501,6 @@ def run_fit_core_gpu(
     )
 
 
-def run_fit_core_cpu_reference(
-    x_lagged: np.ndarray,
-    y_aligned: np.ndarray,
-    config: GPUFitConfig,
-) -> FitCoreMetrics:
-    if config.chunk_size_windows < 1:
-        raise ValueError("chunk_size_windows must be >= 1")
-    if config.chunk_size_features is not None and config.chunk_size_features < 1:
-        raise ValueError("chunk_size_features must be >= 1 when provided")
-
-    feature_counts = rff_feature_counts(min(config.windows), max_features=config.max_features)
-
-    x_t = torch.tensor(x_lagged, device="cpu", dtype=torch.float32)
-    y_t = torch.tensor(y_aligned, device="cpu", dtype=torch.float32)
-
-    feature_profiles: list[FeatureProfile] = []
-    checksum = 0.0
-    total_windows_processed = 0
-    total_chunks_processed = 0
-    total_solve_calls = 0
-    total_primal_solve_calls = 0
-    total_dual_solve_calls = 0
-
-    run_start = time.perf_counter()
-
-    for n_features in feature_counts:
-        feature_start = time.perf_counter()
-
-        rff_start = time.perf_counter()
-        w_t, b_t = generate_rff_weights(
-            n_features,
-            x_t.shape[1],
-            gamma=config.gamma,
-            seed=config.seed,
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-        )
-        z_all = rff_transform(x_t, w_t, b_t)
-        rff_time = time.perf_counter() - rff_start
-
-        window_build_time = 0.0
-        solve_time = 0.0
-        windows_processed = 0
-        chunks_processed = 0
-        solve_calls = 0
-        primal_solve_calls = 0
-        dual_solve_calls = 0
-
-        for window in config.windows:
-            if y_t.shape[0] <= window:
-                continue
-
-            build_start = time.perf_counter()
-            z_windows, y_windows = build_window_tensors(z_all, y_t, window)
-            window_build_time += time.perf_counter() - build_start
-            windows_processed += 1
-
-            solver = _select_solver(config.solver_policy, n_features, window)
-            total_k = z_windows.shape[0]
-            for start in range(0, total_k, config.chunk_size_windows):
-                end = min(start + config.chunk_size_windows, total_k)
-                z_chunk = z_windows[start:end]
-                y_chunk = y_windows[start:end]
-
-                solve_start = time.perf_counter()
-                if solver == "primal":
-                    betas = _solve_primal(z_chunk, y_chunk, config.alphas)
-                    primal_solve_calls += (end - start) * len(config.alphas)
-                else:
-                    betas = _solve_dual(
-                        z_chunk,
-                        y_chunk,
-                        config.alphas,
-                        chunk_size_features=config.chunk_size_features,
-                    )
-                    dual_solve_calls += (end - start) * len(config.alphas)
-                solve_time += time.perf_counter() - solve_start
-
-                for beta in betas.values():
-                    checksum += float(beta.sum().item())
-
-                chunks_processed += 1
-                solve_calls += (end - start) * len(config.alphas)
-
-        feature_total_time = time.perf_counter() - feature_start
-        feature_profiles.append(
-            FeatureProfile(
-                n_features=n_features,
-                rff_time_s=rff_time,
-                window_build_time_s=window_build_time,
-                solve_time_s=solve_time,
-                total_time_s=feature_total_time,
-                windows_processed=windows_processed,
-                chunks_processed=chunks_processed,
-                solve_calls=solve_calls,
-                primal_solve_calls=primal_solve_calls,
-                dual_solve_calls=dual_solve_calls,
-                cuda_memory_allocated_bytes=None,
-                cuda_max_memory_allocated_bytes=None,
-            )
-        )
-
-        total_windows_processed += windows_processed
-        total_chunks_processed += chunks_processed
-        total_solve_calls += solve_calls
-        total_primal_solve_calls += primal_solve_calls
-        total_dual_solve_calls += dual_solve_calls
-
-    total_time = time.perf_counter() - run_start
-
-    return FitCoreMetrics(
-        device="cpu",
-        dtype="torch.float32",
-        n_samples=int(x_t.shape[0]),
-        n_predictors=int(x_t.shape[1]),
-        total_features=len(feature_counts),
-        total_windows_processed=total_windows_processed,
-        total_chunks_processed=total_chunks_processed,
-        total_solve_calls=total_solve_calls,
-        total_primal_solve_calls=total_primal_solve_calls,
-        total_dual_solve_calls=total_dual_solve_calls,
-        total_time_s=total_time,
-        checksum=checksum,
-        feature_profiles=feature_profiles,
-    )
-
-
 def prediction_subset_gpu(
     x_lagged: np.ndarray,
     y_aligned: np.ndarray,
@@ -671,51 +546,6 @@ def prediction_subset_gpu(
         y_true[:take].detach().cpu().numpy(),
     )
 
-
-def prediction_subset_cpu_reference(
-    x_lagged: np.ndarray,
-    y_aligned: np.ndarray,
-    *,
-    window: int,
-    n_features: int,
-    gamma: float,
-    alpha: float,
-    seed: int,
-    solver_policy: SolverPolicy = "auto",
-    sample_count: int = 8,
-) -> tuple[np.ndarray, np.ndarray]:
-    x_t = torch.tensor(x_lagged, device="cpu", dtype=torch.float32)
-    y_t = torch.tensor(y_aligned, device="cpu", dtype=torch.float32)
-
-    w_t, b_t = generate_rff_weights(
-        n_features,
-        x_t.shape[1],
-        gamma=gamma,
-        seed=seed,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-    )
-    z_all = rff_transform(x_t, w_t, b_t)
-
-    z_windows, y_windows = build_window_tensors(z_all, y_t, window)
-    solver = _select_solver(solver_policy, n_features, window)
-    if solver == "primal":
-        betas = _solve_primal(z_windows, y_windows, [alpha])
-    else:
-        betas = _solve_dual(z_windows, y_windows, [alpha], chunk_size_features=None)
-    beta = betas[float(alpha)]
-
-    z_pred = z_all[window - 1 : -1]
-    y_pred = (beta * z_pred).sum(dim=1)
-    y_true = y_t[window:]
-
-    take = min(sample_count, y_pred.shape[0])
-    return (
-        y_pred[:take].detach().cpu().numpy(),
-        y_true[:take].detach().cpu().numpy(),
-    )
-
-
 def print_metrics(metrics: FitCoreMetrics, *, profile: bool) -> None:
     print(f"Device: {metrics.device}")
     print(f"DType: {metrics.dtype}")
@@ -733,12 +563,18 @@ def print_metrics(metrics: FitCoreMetrics, *, profile: bool) -> None:
     if profile and metrics.feature_profiles:
         fastest = min(metrics.feature_profiles, key=lambda x: x.total_time_s)
         slowest = max(metrics.feature_profiles, key=lambda x: x.total_time_s)
-        print(f"Fastest n_features={fastest.n_features} total={fastest.total_time_s:.3f}s")
-        print(f"Slowest n_features={slowest.n_features} total={slowest.total_time_s:.3f}s")
+        print(
+            f"Fastest n_features={fastest.n_features} total={fastest.total_time_s:.3f}s"
+        )
+        print(
+            f"Slowest n_features={slowest.n_features} total={slowest.total_time_s:.3f}s"
+        )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="CUDA fit-core benchmark for RFF ridge.")
+    parser = argparse.ArgumentParser(
+        description="CUDA fit-core benchmark for RFF ridge."
+    )
     parser.add_argument(
         "--fit-only",
         action=argparse.BooleanOptionalAction,
