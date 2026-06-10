@@ -75,3 +75,6 @@ artifacts/
 .DS_Store
 .AppleDouble
 .LSOverride
+
+# Git worktrees
+.worktrees/
