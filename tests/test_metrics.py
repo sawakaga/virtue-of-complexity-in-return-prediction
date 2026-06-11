@@ -58,6 +58,20 @@ def test_alpha_ir_match_statsmodels_ols():
     np.testing.assert_allclose(m["ir"][0, 1], alpha / ols.resid.std(ddof=1), rtol=1e-10)
 
 
+def test_bnrm_mean_over_oos_months():
+    # MATLAB tracks Bnrm = sum(B.^2) per month; the reported quantity is
+    # its time average per config, subsample-masked like everything else.
+    yprd, y, dates = _toy_inputs(k=48)
+    bnrm = np.abs(RNG.normal(size=yprd.shape))
+
+    m = seed_config_metrics(yprd, y, dates, bnrm=bnrm)
+    np.testing.assert_allclose(m["bnrm"], bnrm.mean(axis=0), rtol=1e-12)
+
+    sub = seed_config_metrics(yprd, y, dates, bnrm=bnrm, subsample=(1930, 1931))
+    mask = (dates >= 193001) & (dates <= 193112)
+    np.testing.assert_allclose(sub["bnrm"], bnrm[mask].mean(axis=0), rtol=1e-12)
+
+
 def test_subsample_bounds_filter_by_year():
     yprd, y, dates = _toy_inputs(k=48)
     full = seed_config_metrics(yprd, y, dates)

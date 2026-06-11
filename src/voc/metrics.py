@@ -26,17 +26,22 @@ def seed_config_metrics(
     y: np.ndarray,
     dates: np.ndarray,
     *,
+    bnrm: np.ndarray | None = None,
     subsample: tuple[int, int] | None = None,
 ) -> dict[str, np.ndarray]:
     """Metrics for one seed, [nP, nL] per key.
 
     yprd: [K, nP, nL] OOS forecasts; y: [K] realized (vol-scaled) returns;
-    dates: [K] yyyymm ints. subsample = (first_year, last_year) inclusive.
+    dates: [K] yyyymm ints; bnrm: optional [K, nP, nL] squared beta norms
+    (MATLAB Bnrm), reported as their time average per config.
+    subsample = (first_year, last_year) inclusive.
     """
     if subsample is not None:
         beg, end = subsample
         mask = (dates >= beg * 100 + 1) & (dates <= end * 100 + 12)
         yprd, y = yprd[mask], y[mask]
+        if bnrm is not None:
+            bnrm = bnrm[mask]
 
     n = y.shape[0]
     y_col = y[:, None, None]
@@ -69,7 +74,7 @@ def seed_config_metrics(
     alpha_se = np.sqrt(s2 * (1.0 / n + y_mean**2 / sxx))
 
     with np.errstate(invalid="ignore", divide="ignore"):
-        return {
+        out = {
             "r2": r2,
             "er": er,
             "vol": vol,
@@ -78,6 +83,9 @@ def seed_config_metrics(
             "alpha_t": alpha / alpha_se,
             "ir": alpha / np.sqrt(rss / (n - 1)),
         }
+    if bnrm is not None:
+        out["bnrm"] = bnrm.mean(axis=0)
+    return out
 
 
 def _pct_label(q: float) -> str:

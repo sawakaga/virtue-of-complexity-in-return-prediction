@@ -93,7 +93,9 @@ def main(argv: list[str] | None = None) -> None:
             )
             for label, bounds in subsample_specs:
                 per_sub[label].append(
-                    seed_config_metrics(result.yprd, y_oos, dates_oos, subsample=bounds)
+                    seed_config_metrics(
+                        result.yprd, y_oos, dates_oos, bnrm=result.bnrm, subsample=bounds
+                    )
                 )
             if args.save_predictions:
                 _write_predictions(out_dir, window, seed, grid, prep, result)
