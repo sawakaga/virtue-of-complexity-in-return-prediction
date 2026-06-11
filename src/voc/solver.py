@@ -132,19 +132,49 @@ def fit_one_seed(
 
 
 def _eigh_anywhere(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Batched eigh with CPU fallback for devices lacking Metal/linalg support.
+    """Batched eigh with two fallbacks: device support and LAPACK driver.
 
     MPS raises NotImplementedError for linalg.eigh (as of torch 2.x); the
     Gram chunks are small ([C, T, T], T <= 120), so a CPU round-trip on
     unified memory is cheap relative to the GEMM work that stays on the
     GPU. EAFP keeps this future-proof: when the backend gains eigh, the
     fallback stops being exercised without a code change.
+
+    Separately, torch's syevd (divide-and-conquer) can fail to converge
+    (LAPACK error 151) on high-P Grams whose spectrum has thousands of
+    near-identical eigenvalues — observed intermittently in real T=120
+    runs. Escalate to scipy's QR-iteration driver ("ev"): slower but
+    convergence-robust, applied per batch element only when needed.
     """
     try:
         return torch.linalg.eigh(matrix)
     except NotImplementedError:
-        evals, vecs = torch.linalg.eigh(matrix.cpu())
+        evals, vecs = _eigh_cpu_robust_ok(matrix.cpu())
         return evals.to(matrix.device), vecs.to(matrix.device)
+    except torch._C._LinAlgError:
+        return _eigh_qr_iteration(matrix)
+
+
+def _eigh_cpu_robust_ok(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        return torch.linalg.eigh(matrix)
+    except torch._C._LinAlgError:
+        return _eigh_qr_iteration(matrix)
+
+
+def _eigh_qr_iteration(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-element scipy eigh with the syev (QR iteration) driver."""
+    import scipy.linalg
+
+    host = matrix.detach().cpu().numpy()
+    evals = np.empty(host.shape[:-1], dtype=host.dtype)
+    vecs = np.empty_like(host)
+    for i in range(host.shape[0]):
+        evals[i], vecs[i] = scipy.linalg.eigh(host[i], driver="ev")
+    return (
+        torch.as_tensor(evals, dtype=matrix.dtype, device=matrix.device),
+        torch.as_tensor(vecs, dtype=matrix.dtype, device=matrix.device),
+    )
 
 
 def _accumulate_block(

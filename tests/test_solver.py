@@ -138,3 +138,29 @@ def test_solver_float32_close_to_float64():
         dtype=torch.float32,
     )
     np.testing.assert_allclose(f32.yprd, f64.yprd, atol=5e-3)
+
+
+def test_eigh_falls_back_to_robust_driver_on_lapack_failure(monkeypatch):
+    """syevd (divide-and-conquer) can fail code 151 on high-P Grams with
+    clustered eigenvalues — observed in real T=120 runs. The solver must
+    escalate to the QR-iteration driver and produce the same decomposition.
+    """
+    real_eigh = torch.linalg.eigh
+
+    def flaky_eigh(matrix, *args, **kwargs):
+        raise torch._C._LinAlgError("linalg.eigh: The algorithm failed to converge")
+
+    monkeypatch.setattr(torch.linalg, "eigh", flaky_eigh)
+    try:
+        x, y, w = _toy_problem()
+        fallback = fit_one_seed(
+            x, y, window=12, p_grid=[14, 60], lambdas=[0.1, 10.0], weights=w, gamma=2.0
+        )
+    finally:
+        monkeypatch.setattr(torch.linalg, "eigh", real_eigh)
+
+    normal = fit_one_seed(
+        x, y, window=12, p_grid=[14, 60], lambdas=[0.1, 10.0], weights=w, gamma=2.0
+    )
+    np.testing.assert_allclose(fallback.yprd, normal.yprd, rtol=1e-8)
+    np.testing.assert_allclose(fallback.bnrm, normal.bnrm, rtol=1e-8)
