@@ -24,17 +24,22 @@ def plist(trnwin: int, *, max_p: int = MAX_P) -> list[int]:
 
     MATLAB: [2, 5:floor(T/10):(T-5), (T-4):2:(T+4),
              (T+5):floor(T/2):30T, 31T:10T:(maxP-1), maxP]
+
+    The MATLAB formula assumes maxP >= 31*T (true for the paper's 12000).
+    For smaller budgets (smoke tests, quick scans) values above max_p are
+    clipped so the grid stays sorted and bounded; at the paper's maxP the
+    clip is a no-op and the grid is formula-verbatim.
     """
     if trnwin < 10:
         raise ValueError("trnwin must be >= 10 (floor(T/10) step would be 0)")
-    return [
+    raw = [
         2,
         *_colon(5, trnwin // 10, trnwin - 5),
         *_colon(trnwin - 4, 2, trnwin + 4),
         *_colon(trnwin + 5, trnwin // 2, 30 * trnwin),
         *_colon(31 * trnwin, 10 * trnwin, max_p - 1),
-        max_p,
     ]
+    return [*(p for p in raw if p < max_p), max_p]
 
 
 def feature_count(p: int) -> int:
