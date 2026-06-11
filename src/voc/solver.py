@@ -117,7 +117,7 @@ def fit_one_seed(
                 _accumulate_block(g[:, b0:b1], kacc, ktst, c0=c0, c1=c1, window=window)
             prev_half = half
 
-            evals, u = torch.linalg.eigh(kacc)
+            evals, u = _eigh_anywhere(kacc)
             # u'y once; every lambda is then a diagonal rescale.
             uty = (u.transpose(1, 2) @ y_c.unsqueeze(-1)).squeeze(-1)  # [C, T]
             coef = uty.unsqueeze(-1) / (evals.unsqueeze(-1) + lam_t.view(1, 1, n_l))
@@ -129,6 +129,22 @@ def fit_one_seed(
         yprd=yprd.cpu().numpy(),
         bnrm=bnrm.cpu().numpy(),
     )
+
+
+def _eigh_anywhere(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched eigh with CPU fallback for devices lacking Metal/linalg support.
+
+    MPS raises NotImplementedError for linalg.eigh (as of torch 2.x); the
+    Gram chunks are small ([C, T, T], T <= 120), so a CPU round-trip on
+    unified memory is cheap relative to the GEMM work that stays on the
+    GPU. EAFP keeps this future-proof: when the backend gains eigh, the
+    fallback stops being exercised without a code change.
+    """
+    try:
+        return torch.linalg.eigh(matrix)
+    except NotImplementedError:
+        evals, vecs = torch.linalg.eigh(matrix.cpu())
+        return evals.to(matrix.device), vecs.to(matrix.device)
 
 
 def _accumulate_block(

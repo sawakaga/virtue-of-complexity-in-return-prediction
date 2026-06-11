@@ -26,6 +26,7 @@ import torch
 from tqdm import tqdm
 
 from voc.constants import GAMMA, LAMBDA_GRID, MAX_P, SUBSAMPLES, TRAINING_WINDOWS
+from voc.device import default_dtype, resolve_device
 from voc.grids import plist
 from voc.metrics import aggregate_seed_metrics, seed_config_metrics
 from voc.preprocess import PreparedData, prepare_dataset
@@ -42,7 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--first-seed", type=int, default=1)
     parser.add_argument("--max-p", type=int, default=MAX_P)
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
-    parser.add_argument("--dtype", choices=["float64", "float32"], default="float64")
+    parser.add_argument("--dtype", choices=["auto", "float64", "float32"], default="auto")
     parser.add_argument("--out-dir", type=str, default="artifacts")
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--chunk-windows", type=int, default=128)
@@ -50,21 +51,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _resolve_device(name: str) -> torch.device:
-    # Minimal resolution; richer policy (MPS dtype rules, eigh fallback)
-    # lands with device.py.
-    if name == "auto":
-        return torch.device("cpu")
-    return torch.device(name)
-
-
 _DTYPES = {"float64": torch.float64, "float32": torch.float32}
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    device = _resolve_device(args.device)
-    dtype = _DTYPES[args.dtype]
+    device = resolve_device(args.device)
+    dtype = default_dtype(device) if args.dtype == "auto" else _DTYPES[args.dtype]
+    print(f"device={device.type} dtype={str(dtype).removeprefix('torch.')}")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

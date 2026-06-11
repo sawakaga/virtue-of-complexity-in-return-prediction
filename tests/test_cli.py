@@ -15,7 +15,7 @@ def test_parse_args_defaults():
     assert args.n_seeds == 10
     assert args.first_seed == 1
     assert args.device == "auto"
-    assert args.dtype == "float64"
+    assert args.dtype == "auto"
     assert not args.save_predictions
 
 
