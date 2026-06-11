@@ -36,6 +36,26 @@ SUBSAMPLES = [(1926, 2020), (1926, 1974), (1975, 2020)]
 # Cross-seed percentile bands reported by the paper.
 PERCENTILES = [1, 2.5, 5, 25, 50, 75, 95, 97.5, 99]
 
+# Constructed Goyal-Welch predictors in GYdata.mat column order
+# (tryrff_v2_function_for_each_sim_DropOnePredictor.m, X_columns).
+# The model input is these 14, lagged one month, plus lag_mkt.
+GW_PREDICTOR_ORDER = [
+    "dfy",  # default yield spread: BAA - AAA
+    "infl",  # CPI inflation
+    "svar",  # stock variance (sum of squared daily returns)
+    "de",  # log dividend-earnings ratio: log(D12) - log(E12)
+    "lty",  # long-term government bond yield
+    "tms",  # term spread: lty - tbl
+    "tbl",  # 3-month T-bill rate
+    "dfr",  # default return spread: corpr - ltr
+    "dp",  # log dividend-price ratio: log(D12) - log(Index)
+    "dy",  # log dividend yield: log(D12) - log(lagged Index)
+    "ltr",  # long-term government bond return
+    "ep",  # log earnings-price ratio: log(E12) - log(Index)
+    "bm",  # book-to-market ratio
+    "ntis",  # net equity expansion
+]
+
 PREDICTORS_FILE = "15-predictors.csv"
 TARGET_FILE = "fama-french-return.csv"
 DATE_COL = "yyyymm"
