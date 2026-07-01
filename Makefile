@@ -38,3 +38,6 @@ clean:  ## Clean up cache and build files
 	rm -rf .pytest_cache .ruff_cache .mypy_cache htmlcov .coverage
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
+
+bench:  ## Benchmark fit core across devices/dtypes
+	uv run python scripts/bench.py
